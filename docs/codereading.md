@@ -1,4 +1,4 @@
-# Spring Boot 源码高层总结
+﻿# Spring Boot 源码高层总结
 
 > 基于源码仓库 `spring-projects/spring-boot`（主分支）分析。
 
@@ -57,7 +57,7 @@ spring-boot/
 | `boot.bootstrap` | `BootstrapRegistry` / `BootstrapContext` — 启动早期的注册中心 |
 | `boot.builder` | `SpringApplicationBuilder` — 流式 API 构建父子上下文 |
 | `boot.cloud` | `CloudPlatform` — 云平台检测（K8s/Cloud Foundry） |
-| `boot.context` | **应用上下文核心**（详见下文） |
+| `boot.context` | **应用上下文核心**（详见 3.2） |
 | `boot.convert` | 类型转换服务（`ApplicationConversionService`） |
 | `boot.diagnostics` | 启动失败诊断（`FailureAnalyzer` 体系） |
 | `boot.env` | 环境与属性源（`EnvironmentPostProcessor`, `PropertySourceLoader`） |
@@ -69,6 +69,11 @@ spring-boot/
 | `boot.retry` | 重试模板 |
 | `boot.ssl` | SSL/TLS 配置（PEM/JKS 证书加载） |
 | `boot.system` | 系统信息（`ApplicationHome`, `JavaVersion`, `ApplicationPid`） |
+| `boot.task` | `TaskExecutorBuilder` / `TaskSchedulerBuilder` |
+| `boot.thread` | 线程工具（虚拟线程支持） |
+| `boot.util` | 通用工具 |
+| `boot.validation` | 校验支持（Bean Validation 集成） |
+| `boot.web` | **Web 支持**（Servlet/Reactive 上下文、错误处理、嵌入式容器） |
 
 ### 3.2 `spring-boot/context` — 应用上下文核心
 
@@ -92,6 +97,11 @@ spring-boot/
 
 | 核心类 | 职责 |
 |--------|------|
+| `AutoConfigurationImportSelector` | **自动配置选择器**：实现 `DeferredImportSelector`，延迟加载 |
+| `EnableAutoConfiguration` | 入口注解，`@Import(AutoConfigurationImportSelector.class)` |
+| `SpringBootApplication` | 组合注解 = `@SpringBootConfiguration` + `@EnableAutoConfiguration` + `@ComponentScan` |
+| `AutoConfiguration` | 标记注解（替代 `@Configuration`，标记自动配置类） |
+| `AutoConfigurationSorter` | 排序器（处理 `@AutoConfigureOrder` / `@After` / `@Before`） |
 
 ---
 
@@ -121,6 +131,26 @@ module/
 ├── spring-boot-opentelemetry    ← OpenTelemetry
 ├── spring-boot-devtools         ← 开发工具（热重启）
 └── ...                          ← 共 110+ 个模块
+```
+
+**设计优势**：按需加载、清晰边界、`autoconfigure-classic` 向后兼容。
+
+### 4.2 Starter 体系（~130 个）
+
+Starter 是**纯 POM 依赖聚合**，零代码：
+
+```
+starter/
+├── spring-boot-starter              ← 核心（日志 + autoconfigure）
+├── spring-boot-starter-web          ← Web（webmvc + tomcat）
+├── spring-boot-starter-webflux      ← 响应式 Web
+├── spring-boot-starter-data-jpa     ← JPA（含 Hibernate）
+├── spring-boot-starter-security     ← Security
+├── spring-boot-starter-test         ← 测试（JUnit5 + Mockito + AssertJ）
+├── spring-boot-starter-actuator     ← 运维监控
+├── spring-boot-starter-parent       ← 父 POM（版本管理）
+└── ...
+```
 
 ---
 
@@ -143,6 +173,12 @@ module/
 - **DevTools**：热重启、LiveReload、远程调试
 - **AOT/Native**：Spring AOT 引擎 → GraalVM Native Image 编译
 - **Docker Compose**：`spring-boot-docker-compose` 自动管理服务依赖
+- **SSL 自动配置**：PEM/JKS 证书自动加载与热更新
+- **虚拟线程**：`spring.threads.virtual.enabled=true`
+- **结构化日志**：`logging.structured.format=ecs`
+- **gRPC 支持**：`spring-boot-grpc-server/client`
+- **可观测性**：Micrometer Metrics + Tracing + OpenTelemetry
+- **Checkpoint/Restore**：CRaC（Coordinated Restore at Checkpoint）支持
 
 ---
 
@@ -193,6 +229,36 @@ main() 入口
 
 **生命周期阶段**：`starting` → `environmentPrepared` → `contextPrepared` → `contextLoaded` → `refresh` → `started` → `ready` → (可选) `failed`
 
+### 6.2 自动配置完整链路
+
+```
+@SpringBootApplication
+  ├─ @SpringBootConfiguration（= @Configuration）
+  ├─ @EnableAutoConfiguration
+  │     └─ @Import(AutoConfigurationImportSelector.class)
+  │           │
+  │           ├─ 实现 DeferredImportSelector（延迟到用户 Bean 注册后执行）
+  │           │
+  │           ├─ getCandidateConfigurations()
+  │           │     └─ ImportCandidates.load(AutoConfiguration.class)
+  │           │           └─ 读取 META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
+  │           │
+  │           ├─ 去重 + 排除
+  │           │     ├─ spring.autoconfigure.exclude 属性
+  │           │     └─ @EnableAutoConfiguration.exclude / .excludeName
+  │           │
+  │           ├─ 条件过滤（ConfigurationClassFilter）
+  │           │     ├─ OnClassCondition → class 是否存在
+  │           │     ├─ OnBeanCondition → Bean 是否存在
+  │           │     └─ OnPropertyCondition → 配置属性值是否匹配
+  │           │
+  │           ├─ 排序
+  │           │     └─ @AutoConfigureOrder / @AutoConfigureAfter / @AutoConfigureBefore
+  │           │
+  │           └─ 返回最终要导入的配置类列表 → 注册为 Bean
+  │
+  └─ @ComponentScan（扫描用户定义的 @Component/@Service/@Repository 等）
+```
 
 ### 6.3 条件注解体系（`autoconfigure/condition/`）
 
@@ -241,6 +307,20 @@ Spring Boot 通过 `META-INF/spring/*.imports` 文件实现可插拔扩展：
 | 模式 | 应用场景 | 核心类 |
 |------|---------|--------|
 | **模板方法** | 启动流程 | `SpringApplication.run()` |
+| **策略模式** | Context 创建 | `ApplicationContextFactory` |
+| **观察者模式** | 启动事件 | `SpringApplicationRunListener` + Spring Events |
+| **责任链** | 失败分析 | `FailureAnalyzers` |
+| **构建器模式** | 上下文构建 | `SpringApplicationBuilder` |
+| **工厂模式** | Web 容器创建 | `WebServerFactory` 体系 |
+| **导入选择器** | 延迟自动配置 | `DeferredImportSelector` |
+
+### 7.3 关键设计决策
+
+1. **DeferredImportSelector**：自动配置延迟到用户 Bean 之后注册，用户配置优先
+2. **模块化拆分（3.x）**：巨石 autoconfigure → 110+ 微模块，按需加载
+3. **`.imports` 替代 `spring.factories`**：按注解而非按接口发现，2.7 引入 / 3.0 切换，性能更优
+4. **Type-safe Binding**：`Binder` API 支持宽松绑定、构造器绑定、嵌套对象、集合/Map
+5. **并行条件评估**：`OnClassCondition` 多核环境下多线程并行评估 class 存在性
 
 ---
 
@@ -250,7 +330,7 @@ Spring Boot 通过 `META-INF/spring/*.imports` 文件实现可插拔扩展：
 |-------------|---------------------------------|
 | **应用如何启动** | `core/spring-boot/.../boot/SpringApplication.java` → `run()` 方法 |
 | **自动配置如何发现** | `core/spring-boot-autoconfigure/.../autoconfigure/AutoConfigurationImportSelector.java` → `getAutoConfigurationEntry()` |
-| **条件注解如何工作** | `core/spring-boot-autoconfigure/.../condition/OnClassCondition.java` → 起点 |
+| **条件注解如何工作** | `core/spring-boot-autoconfigure/.../condition/OnClassCondition.java` |
 | **属性如何绑定** | `core/spring-boot/.../context/properties/bind/Binder.java` |
 | **Web 服务器如何启动** | `core/spring-boot/.../web/servlet/WebServerFactory` 系列 |
 | **失败分析如何工作** | `core/spring-boot/.../diagnostics/analyzer/` 包 |
@@ -299,109 +379,3 @@ Spring Boot 通过 `META-INF/spring/*.imports` 文件实现可插拔扩展：
   web/context/ServletWebServerApplicationContext.java — Servlet Web Context
   web/context/reactive/ReactiveWebServerApplicationContext.java — Reactive Web Context
 ```
-
-| **策略模式** | Context 创建 | `ApplicationContextFactory` |
-| **观察者模式** | 启动事件 | `SpringApplicationRunListener` + Spring Events |
-| **责任链** | 失败分析 | `FailureAnalyzers` |
-| **构建器模式** | 上下文构建 | `SpringApplicationBuilder` |
-| **工厂模式** | Web 容器创建 | `WebServerFactory` 体系 |
-| **导入选择器** | 延迟自动配置 | `DeferredImportSelector` |
-
-### 7.3 关键设计决策
-
-1. **DeferredImportSelector**：自动配置延迟到用户 Bean 之后注册，用户配置优先
-2. **模块化拆分（3.x）**：巨石 autoconfigure → 110+ 微模块，按需加载
-3. **`.imports` 替代 `spring.factories`**：按注解而非按接口发现，2.7 引入 / 3.0 切换，性能更优
-4. **Type-safe Binding**：`Binder` API 支持宽松绑定、构造器绑定、嵌套对象、集合/Map
-5. **并行条件评估**：`OnClassCondition` 多核环境下多线程并行评估 class 存在性
-
-### 6.2 自动配置完整链路
-
-```
-@SpringBootApplication
-  ├─ @SpringBootConfiguration（= @Configuration）
-  ├─ @EnableAutoConfiguration
-  │     └─ @Import(AutoConfigurationImportSelector.class)
-  │           │
-  │           ├─ 实现 DeferredImportSelector（延迟到用户 Bean 注册后执行）
-  │           │
-  │           ├─ getCandidateConfigurations()
-  │           │     └─ ImportCandidates.load(AutoConfiguration.class)
-  │           │           └─ 读取 META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
-  │           │
-  │           ├─ 去重 + 排除
-  │           │     ├─ spring.autoconfigure.exclude 属性
-  │           │     └─ @EnableAutoConfiguration.exclude / .excludeName
-  │           │
-  │           ├─ 条件过滤（ConfigurationClassFilter）
-  │           │     ├─ OnClassCondition → class 是否存在
-  │           │     ├─ OnBeanCondition → Bean 是否存在
-  │           │     └─ OnPropertyCondition → 配置属性值是否匹配
-  │           │
-  │           ├─ 排序
-  │           │     └─ @AutoConfigureOrder / @AutoConfigureAfter / @AutoConfigureBefore
-  │           │
-  │           └─ 返回最终要导入的配置类列表 → 注册为 Bean
-  │
-  └─ @ComponentScan（扫描用户定义的 @Component/@Service/@Repository 等）
-```
-
-- **SSL 自动配置**：PEM/JKS 证书自动加载与热更新
-- **虚拟线程**：`spring.threads.virtual.enabled=true`
-- **结构化日志**：`logging.structured.format=ecs`
-- **gRPC 支持**：`spring-boot-grpc-server/client`
-- **可观测性**：Micrometer Metrics + Tracing + OpenTelemetry
-- **Checkpoint/Restore**：CRaC（Coordinated Restore at Checkpoint）支持
-
-```
-
-**设计优势**：按需加载、清晰边界、`autoconfigure-classic` 向后兼容。
-
-### 4.2 Starter 体系（~130 个）
-
-Starter 是**纯 POM 依赖聚合**，零代码：
-
-```
-starter/
-├── spring-boot-starter              ← 核心（日志 + autoconfigure）
-├── spring-boot-starter-web          ← Web（webmvc + tomcat）
-├── spring-boot-starter-webflux      ← 响应式 Web
-├── spring-boot-starter-data-jpa     ← JPA（含 Hibernate）
-├── spring-boot-starter-security     ← Security
-├── spring-boot-starter-test         ← 测试（JUnit5 + Mockito + AssertJ）
-├── spring-boot-starter-actuator     ← 运维监控
-├── spring-boot-starter-parent       ← 父 POM（版本管理）
-└── ...
-```
-
-| `AutoConfigurationImportSelector` | **自动配置选择器**：实现 `DeferredImportSelector`，延迟加载 |
-| `EnableAutoConfiguration` | 入口注解，`@Import(AutoConfigurationImportSelector.class)` |
-| `SpringBootApplication` | 组合注解 = `@SpringBootConfiguration` + `@EnableAutoConfiguration` + `@ComponentScan` |
-| `AutoConfiguration` | 标记注解（替代 `@Configuration`，标记自动配置类） |
-| `AutoConfigurationSorter` | 排序器（处理 `@AutoConfigureOrder`/`@After`/`@Before`） |
-| `AutoConfiguration.imports` | 自动配置类注册文件（位于 `META-INF/spring/`） |
-
-| `boot.task` | `TaskExecutorBuilder` / `TaskSchedulerBuilder` |
-| `boot.thread` | 线程工具（虚拟线程支持） |
-| `boot.util` | 通用工具 |
-| `boot.validation` | 校验支持（Bean Validation 集成） |
-| `boot.web` | **Web 支持**（Servlet/Reactive 上下文、错误处理、嵌入式容器） |
-
-├── core/                          # 核心引擎（spring-boot, spring-boot-autoconfigure）
-├── module/                        # 功能模块（按技术栈拆分的自动配置模块）
-├── starter/                       # Starter POM（便捷依赖聚合）
-├── loader/                        # 类加载器（spring-boot-loader, loader-tools）
-├── platform/                       # 版本平台（BOM: spring-boot-dependencies）
-├── build-plugin/                  # 构建插件（Maven/Gradle/Ant）
-├── buildpack/                     # Buildpack 支持
-├── cli/                           # Spring Boot CLI
-├── configuration-metadata/        # 配置元数据处理器
-├── buildSrc/                      # Gradle 构建约定插件
-├── test-support/                  # 测试支持库
-├── integration-test/              # 集成测试
-├── system-test/                   # 系统测试（部署/镜像）
-├── smoke-test/                    # 冒烟测试（约 100+ 场景）
-├── documentation/                 # 文档生成
-└── docs/                          # 项目文档
-```
-
